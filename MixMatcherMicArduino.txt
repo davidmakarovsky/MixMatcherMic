@@ -1,0 +1,150 @@
+#include "driver/i2s.h"
+#include "driver/adc.h"
+#include <Arduino.h>
+
+#define LED 2
+#define BUTTON1 27  
+#define BUTTON2 32 
+#define I2S_NUM I2S_NUM_0  // I2S port number
+#define SAMPLE_RATE 16000  // Sample rate for the audio
+#define BUFFER_SIZE 512  // Buffer size for one batch of audio data
+
+unsigned long lastDebounceTime = 0;  
+unsigned long debounceDelay = 50;    
+bool isRecording = false;            
+bool lastButtonState1 = HIGH;
+bool lastButtonState2 = HIGH; 
+bool recordingNoiseReducer = false;
+bool recordingAutoTune = false;       
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(BUTTON1, INPUT_PULLUP);
+  pinMode(BUTTON2, INPUT_PULLUP);
+
+  pinMode(LED, OUTPUT);
+  digitalWrite(LED, LOW);
+
+  // Configure the I2S driver for ADC reading
+  i2s_config_t i2s_config = {
+      .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX | I2S_MODE_ADC_BUILT_IN),
+      .sample_rate = 16000,
+      .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+      .channel_format = I2S_CHANNEL_FMT_ONLY_RIGHT,
+      .communication_format = I2S_COMM_FORMAT_I2S_MSB,
+      .intr_alloc_flags = 0,
+      .dma_buf_count = 4,
+      .dma_buf_len = 256,
+      .use_apll = false,
+  };
+
+  // Install and start i2s driver
+  i2s_driver_install(I2S_NUM, &i2s_config, 0, NULL);
+  i2s_set_adc_mode(ADC_UNIT_1, ADC1_CHANNEL_5);  // Adjust ADC1_CHANNEL_0 based on your wiring
+  i2s_adc_enable(I2S_NUM);
+}
+
+void loop() {
+  int buttonState1 = digitalRead(BUTTON1);
+  int buttonState2 = digitalRead(BUTTON2);
+  
+  if (buttonState1 != lastButtonState1 || buttonState2 != lastButtonState2) {
+    if (millis() - lastDebounceTime > debounceDelay) {
+      if ((buttonState1 == LOW && lastButtonState1 == HIGH) || (buttonState2 == LOW && lastButtonState2 == HIGH)) {
+        isRecording = !isRecording;
+        lastDebounceTime = millis();
+        
+        if (isRecording) {
+          int waitTime = 3000;
+          int startTime = millis();
+          if(buttonState1 == LOW){
+            while(waitTime + startTime > millis()){
+              if(digitalRead(BUTTON2) == LOW){
+                Serial.write(12);
+                //Serial.println("AUTOTUNE and NOISEREDUCER");
+                buttonState2 = LOW;
+                break;
+              }
+            }
+            if(buttonState2 != LOW){
+              Serial.write(1);
+            }
+            //Serial.println("NOISEREDUCER");
+            recordNoiseReducerSample();
+          }else{
+            while(waitTime + startTime > millis()){
+              if(digitalRead(BUTTON1) == LOW){
+                Serial.write(12);
+                //Serial.println("NOISEREDUCER");
+                buttonState1 = LOW;
+                break;
+              }
+            }
+            if(buttonState1 != LOW){
+              Serial.write(2);
+            }
+            //Serial.println("AUTOTUNE");
+          }
+        } else {
+          sendAudioData();
+          Serial.println("Recording stopped, sending data...");
+          Serial.println("ENDAUDIO");
+        }
+      }
+    }
+  }
+  lastButtonState1 = buttonState1;
+  lastButtonState2 = buttonState2;
+
+  if(isRecording){
+    recordAudio();
+  }
+}
+
+
+void recordNoiseReducerSample() {
+  const int sampleAudio = 5000; //change to how long audio sample should be for noise reducer
+  int startTime = millis();
+  recordingNoiseReducer = true;
+  while(millis() < startTime + sampleAudio){
+    recordAudio();
+  }
+  recordingNoiseReducer = false;
+}
+
+void recordAudio() {
+  if(!recordingNoiseReducer){
+    digitalWrite(LED, HIGH);
+  }
+  
+  static int16_t buffer[BUFFER_SIZE];
+  size_t bytesRead;
+
+  // Read data from I2S and send it directly if recording
+  if (i2s_read(I2S_NUM, &buffer, sizeof(buffer), &bytesRead, portMAX_DELAY) == ESP_OK) {
+    if (bytesRead > 0) {
+      Serial.write((uint8_t *)buffer, bytesRead);
+    }
+  }
+}
+
+void sendAudioData() {
+  int16_t buffer[BUFFER_SIZE];
+  size_t bytesRead;
+
+  // Flush remaining data in the buffer
+  /*
+  while (i2s_read(I2S_NUM, &buffer, sizeof(buffer), &bytesRead, portMAX_DELAY) == ESP_OK && bytesRead > 0) {
+    Serial.write((uint8_t *)buffer, bytesRead);
+  }
+  */
+  if (i2s_read(I2S_NUM, &buffer, sizeof(buffer), &bytesRead, portMAX_DELAY) == ESP_OK) {
+    if (bytesRead > 0) {
+      Serial.write((uint8_t *)buffer, bytesRead);
+    }
+  }
+  Serial.flush();
+  
+  Serial.println("ENDAUDIO");
+  digitalWrite(LED, LOW);
+}
